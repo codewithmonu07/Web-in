@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Runner (Subway-style) - Web.In</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* minimal page style (keeps your dark theme) */
+    body { margin:0; background:#0f0f10; color:#fff; font-family:Arial, sans-serif; }
+    header { display:flex; align-items:center; gap:10px; padding:10px 14px; background:#121212; }
+    .logo-img { height:44px; }
+    a.site { color:#04fffb; font-weight:700; text-decoration:none; }
+    main { padding:12px; display:flex; justify-content:center; }
+    .game-wrapper { width:100%; max-width:900px; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:6px 0; }
+    #hud { color:#ffd86b; font-weight:700; }
+    .controls { display:flex; gap:8px; justify-content:center; margin-top:8px; }
+    .btn { background:#04fffb; color:#000; border:none; padding:10px 14px; border-radius:8px; font-weight:700; }
+    .small { padding:8px 10px; font-size:14px; }
+    footer { margin-top:14px; padding:10px; background:#161616; color:#ddd; text-align:center; }
+    @media (max-width:520px){
+      .logo-img{height:34px;}
+    }
+  </style>
+</head>
+<body>
+  <!-- header -->
+  <header>
+    <img src="logo.png" alt="logo" class="logo-img">
+    <a class="site" href="index.html">Web.In</a>
+  </header>
+
+  <main>
+    <div class="game-wrapper">
+      <div class="topbar">
+        <div><strong>🏃 Runner</strong></div>
+        <div id="hud">Score: <span id="score">0</span> • Coins: <span id="coins">0</span></div>
+      </div>
+
+      <!-- Phaser canvas will be injected here -->
+      <div id="gameDiv" style="width:100%; height:560px; background:#000; border-radius:12px; overflow:hidden;"></div>
+
+      <div class="controls">
+        <button id="leftBtn" class="btn small">⬅</button>
+        <button id="jumpBtn" class="btn small">⤴ Jump</button>
+        <button id="slideBtn" class="btn small">⤵ Slide</button>
+        <button id="rightBtn" class="btn small">➡</button>
+        <button id="restartBtn" class="btn small">⟳ Restart</button>
+      </div>
+    </div>
+  </main>
+
+  <footer>Made with ♥ by Web.In — Play on Android or Desktop</footer>
+
+  <!-- Phaser 3 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+
+  <script>
+  /*
+    Subway-style 2.5D runner (Phaser 3)
+    - 3 lanes
+    - lane switch, jump, slide
+    - coins & obstacles
+    - touch swipe + buttons + keyboard
+    - generated graphics (no assets needed)
+  */
+
+  const LANES_X = [-110, 0, 110]; // x positions for 3 lanes (center at 0)
+  const GAME_WIDTH = 540;
+  const GAME_HEIGHT = 560;
+
+  const config = {
+    type: Phaser.AUTO,
+    parent: 'gameDiv',
+    width: GAME_WIDTH,
+    height: GAME_HEIGHT,
+    backgroundColor: 0x0b0b0c,
+    physics: {
+      default: 'arcade',
+      arcade: { gravity: { y: 1200 }, debug: false }
+    },
+    scene: {
+      preload: preload,
+      create: create,
+      update: update
+    }
+  };
+
+  const game = new Phaser.Game(config);
+
+  let player, cursors, speed = 260, spawnTimer = 0, score = 0, coins = 0;
+  let obstaclesGroup, coinsGroup, laneIndex = 1, targetX = LANES_X[1];
+  let isSliding = false, slideTimer = 0, canJump = true;
+  let scoreTextEl = document.getElementById('score'), coinsTextEl = document.getElementById('coins');
+
+  function preload() {
+    // create simple textures (rectangle player, obstacle, coin) using graphics then generate texture
+    this.graphics = this.add.graphics();
+
+    // player texture
+    this.graphics.clear();
+    this.graphics.fillStyle(0x00ffd7, 1);
+    this.graphics.fillRoundedRect(0, 0, 42, 64, 8);
+    this.graphics.generateTexture('player', 42, 64);
+
+    // obstacle (crate)
+    this.graphics.clear();
+    this.graphics.fillStyle(0xff4d4d, 1);
+    this.graphics.fillRect(0, 0, 48, 48);
+    this.graphics.generateTexture('obstacle', 48, 48);
+
+    // low obstacle (bar)
+    this.graphics.clear();
+    this.graphics.fillStyle(0xff8f4d, 1);
+    this.graphics.fillRect(0, 0, 56, 18);
+    this.graphics.generateTexture('lowObs', 56, 18);
+
+    // coin (circle)
+    this.graphics.clear();
+    this.graphics.fillStyle(0xffd700, 1);
+    this.graphics.fillCircle(12, 12, 12);
+    this.graphics.generateTexture('coin', 24, 24);
+
+    // road stripe
+    this.graphics.clear();
+    this.graphics.fillStyle(0xffffff, 1);
+    this.graphics.fillRect(0, 0, 8, 40);
+    this.graphics.generateTexture('stripe', 8, 40);
+  }
+
+  function create() {
+    const scene = this;
+
+    // camera center
+    this.cameras.main.setView(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    // add parallax road background (dark)
+    const road = this.add.rectangle(GAME_WIDTH/2, GAME_HEIGHT/2 + 30, GAME_WIDTH * 0.8, GAME_HEIGHT + 100, 0x141414).setDepth(0);
+    // create repeated stripes on road
+    this.stripes = this.physics.add.staticGroup();
+    for (let i=0;i<40;i++) {
+      const s = this.add.image(GAME_WIDTH/2, i * 80 - 200, 'stripe').setTint(0xe6e6e6);
+      s.setDepth(1);
+      this.stripes.add(s);
+    }
+
+    // create groups
+    obstaclesGroup = this.physics.add.group();
+    coinsGroup = this.physics.add.group();
+
+    // player (physics body)
+    player = this.physics.add.sprite(GAME_WIDTH/2 + LANES_X[laneIndex], GAME_HEIGHT - 130, 'player').setOrigin(0.5, 1);
+    player.setCollideWorldBounds(true);
+    player.body.setSize(36, 56).setOffset(3, 8);
+    player.setDepth(2);
+    player.setBounce(0);
+
+    // small shadow
+    player.shadow = this.add.ellipse(player.x, player.y + 4, 46, 18, 0x000000, 0.3).setDepth(1);
+
+    // input
+    cursors = this.input.keyboard.createCursorKeys();
+    this.input.keyboard.on('keydown-R', () => restart(scene));
+
+    // collisions
+    this.physics.add.overlap(player, coinsGroup, collectCoin, null, this);
+    this.physics.add.overlap(player, obstaclesGroup, hitObstacle, null, this);
+
+    // mobile swipe
+    let startX = 0, startY = 0;
+    scene.input.on('pointerdown', function (pointer) { startX = pointer.x; startY = pointer.y; });
+    scene.input.on('pointerup', function (pointer) {
+      const dx = pointer.x - startX, dy = pointer.y - startY;
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 30) {
+        if (dx > 0) moveRight(); else moveLeft();
+      } else if (Math.abs(dy) > 30) {
+        if (dy < 0) doJump(); else doSlide();
+      } else {
+        // small taps -> jump
+        doJump();
+      }
+    });
+
+    // UI Buttons hooking
+    document.getElementById('leftBtn').addEventListener('click', moveLeft);
+    document.getElementById('rightBtn').addEventListener('click', moveRight);
+    document.getElementById('jumpBtn').addEventListener('click', doJump);
+    document.getElementById('slideBtn').addEventListener('click', doSlide);
+    document.getElementById('restartBtn').addEventListener('click', () => restart(scene));
+
+    // initial HUD
+    updateHUD();
+
+    // start
+    this.isRunning = true;
+    this.timeSinceStart = 0;
+  }
+
+  function update(time, delta) {
+    if (!this.isRunning) return;
+    const scene = this;
+    const dt = delta / 1000;
+
+    // move stripes to simulate forward motion
+    this.stripes.getChildren().forEach((s, idx) => {
+      s.y += speed * dt * 0.6;
+      if (s.y > GAME_HEIGHT + 40) s.y -= 80 * 40;
+    });
+
+    // move obstacles/coins toward player (increase y)
+    obstaclesGroup.getChildren().forEach(o => {
+      o.y += speed * dt;
+      if (o.y > GAME_HEIGHT + 80) { o.destroy(); }
+    });
+    coinsGroup.getChildren().forEach(c => {
+      c.y += speed * dt;
+      if (c.y > GAME_HEIGHT + 80) { c.destroy(); }
+      else { c.rotation += 0.12; }
+    });
+
+    // spawn logic (speed up with time)
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawn(scene);
+      spawnTimer = Math.max(0.35, 0.9 - Math.min(0.5, score * 0.0009)); // spawn faster over time
+    }
+
+    // player horizontal interpolation (smooth lane change)
+    const desiredX = GAME_WIDTH/2 + targetX;
+    player.x += (desiredX - player.x) * Math.min(1, 10 * dt);
+    player.shadow.x = player.x;
+    player.shadow.y = player.y + 4;
+
+    // sliding logic
+    if (isSliding) {
+      slideTimer -= dt;
+      if (slideTimer <= 0) { endSlide(); }
+    }
+
+    // small gravity & ground check (we use arcade gravity to handle jump)
+    if (player.body.blocked.down) { canJump = true; }
+
+    // score increases over time
+    score += Math.floor(speed * dt * 0.04);
+    updateHUD();
+
+    // keyboard lane controls
+    if (cursors.left.isDown) moveLeft();
+    if (cursors.right.isDown) moveRight();
+    if (Phaser.Input.Keyboard.JustDown(cursors.up)) doJump();
+    if (Phaser.Input.Keyboard.JustDown(cursors.down)) doSlide();
+  }
+
+  // spawn obstacle or coin ahead
+  function spawn(scene) {
+    const r = Math.random();
+    const lane = Phaser.Math.Between(0, 2);
+    const x = GAME_WIDTH/2 + LANES_X[lane];
+    const y = -60;
+
+    if (r < 0.65) {
+      // normal obstacle (tall)
+      const obs = scene.physics.add.image(x, y, 'obstacle').setOrigin(0.5, 0.5);
+      obs.setImmovable(true);
+      obs.body.allowGravity = false;
+      obs.setDepth(2);
+      obstaclesGroup.add(obs);
+    } else if (r < 0.85) {
+      // low obstacle (requires jump or sliding)
+      const obs = scene.physics.add.image(x, y, 'lowObs').setOrigin(0.5, 0.5);
+      obs.setImmovable(true);
+      obs.body.allowGravity = false;
+      obs.setDepth(2);
+      obstaclesGroup.add(obs);
+    } else {
+      // coin
+      const coin = scene.physics.add.image(x, y, 'coin').setOrigin(0.5, 0.5);
+      coin.setImmovable(true);
+      coin.body.allowGravity = false;
+      coin.setDepth(2);
+      coinsGroup.add(coin);
+    }
+  }
+
+  function moveLeft() {
+    laneIndex = Math.max(0, laneIndex - 1);
+    targetX = LANES_X[laneIndex];
+  }
+  function moveRight() {
+    laneIndex = Math.min(2, laneIndex + 1);
+    targetX = LANES_X[laneIndex];
+  }
+  function doJump() {
+    if (!player) return;
+    if (player.body.blocked.down && canJump && !isSliding) {
+      player.setVelocityY(-580);
+      canJump = false;
+    }
+  }
+  function doSlide() {
+    if (!player || isSliding || !player.body.blocked.down) return;
+    isSliding = true;
+    slideTimer = 0.55; // seconds
+    // shrink player height visually & change hitbox
+    player.setScale(1, 0.56);
+    player.body.setSize(36, 34).setOffset(3, 26);
+  }
+  function endSlide() {
+    isSliding = false;
+    player.setScale(1, 1);
+    player.body.setSize(36, 56).setOffset(3, 8);
+  }
+
+  function collectCoin(p, coin) {
+    coins++;
+    coinsTextEl.textContent = coins;
+    coin.destroy();
+  }
+
+  function hitObstacle(p, obs) {
+    // collision rules: if it's low obstacle and player sliding => ignore
+    if (obs.texture.key === 'lowObs' && isSliding) {
+      // pass under: just destroy the obstacle
+      obs.destroy();
+      return;
+    }
+    // if player is jumping high enough to pass above (y < threshold) allow
+    if (obs.texture.key === 'obstacle' && player.y < (GAME_HEIGHT - 180)) {
+      // jumped over
+      obs.destroy();
+      return;
+    }
+    // else game over
+    this = game.scene.scenes[0]; // scene
+    this.isRunning = false;
+    // simple game over flow
+    setTimeout(()=> {
+      alert('💥 You crashed! Score: ' + score + ' • Coins: ' + coins + '\nTap Restart to try again.');
+    }, 80);
+  }
+
+  function updateHUD() {
+    scoreTextEl.textContent = score;
+    coinsTextEl.textContent = coins;
+  }
+
+  function restart(scene) {
+    // clear groups
+    obstaclesGroup.clear(true, true);
+    coinsGroup.clear(true, true);
+    // reset player
+    laneIndex = 1; targetX = LANES_X[1];
+    player.x = GAME_WIDTH/2 + targetX;
+    player.y = GAME_HEIGHT - 130;
+    player.setVelocity(0,0);
+    player.setScale(1,1);
+    endSlide();
+    // reset stats
+    score = 0; coins = 0; speed = 260; spawnTimer = 0;
+    updateHUD();
+    // resume
+    scene.isRunning = true;
+  }
+
+  // expose restart to global for button hooking
+  window.restart = () => restart(game.scene.scenes[0]);
+
+  // auto-resize canvas parent container if device width smaller
+  function responsiveResize() {
+    const parent = document.getElementById('gameDiv');
+    const w = parent.clientWidth;
+    const aspect = GAME_WIDTH / GAME_HEIGHT;
+    // set canvas style to fit parent with preserved aspect
+    const newW = Math.min(w, 900);
+    const newH = Math.floor(newW / aspect);
+    parent.style.height = newH + 'px';
+    game.scale.resize(newW, newH);
+  }
+  window.addEventListener('resize', responsiveResize);
+  setTimeout(responsiveResize, 50);
+  </script>
+</body>
+</html>
